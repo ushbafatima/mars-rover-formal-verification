@@ -3,16 +3,13 @@
 -- FAULTY MODEL B — LTL Counterexample Demonstration
 -- Demonstrates violation of L1: Safe Mode Must Precede Drive Resumption
 --
--- BUG INTRODUCED: OBSTACLE_DETECTED goes directly to DRIVING instead of
--- REPLANNING. However the power guards are kept intact so C1 still passes.
--- After a power fault, the rover goes OBSTACLE_DETECTED -> DRIVING without
--- ever visiting SAFE_MODE, violating L1's Until obligation.
+-- BUG: OBSTACLE_DETECTED skips straight to DRIVING instead of REPLANNING.
+-- When power_fault_active=TRUE, rover drives without visiting SAFE_MODE,
+-- violating L1's Until obligation: fault_active -> !DRIVING U SAFE_MODE
 --
 -- Expected output:
---   -- specification AG (power.power_state = CRITICAL -> ...) is true   <- C1 passes
---   -- specification G (power.power_fault_active ->
---        X((nav.nav_state != DRIVING) U (nav.nav_state = SAFE_MODE))) is false
---   Trace Type: Counterexample (LASSO — look for "-- Loop starts here --")
+--   C1 → true  (power guard covers all states)
+--   L1 → false (lasso counterexample, look for "-- Loop starts here --")
 -- =============================================================================
 
 MODULE PowerModule
@@ -43,7 +40,7 @@ FAIRNESS power_state != CRITICAL
 
 
 -- =============================================================================
-MODULE CommModule(power_state, power_fault_active)
+MODULE CommModule(power_state)
 
 VAR
   comm_state          : { CONNECTED, DEGRADED, BLACKOUT, AUTOMODE };
@@ -52,30 +49,30 @@ VAR
 
 ASSIGN
   init(comm_state)          := CONNECTED;
-  init(pre_approved_loaded) := TRUE;
+  init(pre_approved_loaded) := FALSE;
   init(blackout_steps)      := 0;
 
   next(comm_state) :=
     case
-      comm_state = CONNECTED & power_state = CRITICAL  : AUTOMODE;
-      comm_state = CONNECTED & power_state != CRITICAL : { CONNECTED, DEGRADED };
-      comm_state = DEGRADED  & power_state = CRITICAL  : AUTOMODE;
-      comm_state = DEGRADED  & power_state != CRITICAL : { DEGRADED, BLACKOUT, CONNECTED };
-      comm_state = BLACKOUT  & blackout_steps >= 18    : DEGRADED;
-      comm_state = BLACKOUT  & blackout_steps < 18     : BLACKOUT;
-      comm_state = AUTOMODE  & power_state != CRITICAL : { AUTOMODE, DEGRADED };
-      comm_state = AUTOMODE  & power_state = CRITICAL  : AUTOMODE;
-      TRUE : comm_state;
+      comm_state = CONNECTED & power_state = CRITICAL          : AUTOMODE;
+      comm_state = CONNECTED & power_state != CRITICAL         : { CONNECTED, DEGRADED };
+      comm_state = DEGRADED  & power_state = CRITICAL          : AUTOMODE;
+      comm_state = DEGRADED  & power_state != CRITICAL         : { DEGRADED, BLACKOUT, CONNECTED };
+      comm_state = BLACKOUT  & blackout_steps >= 18            : DEGRADED;
+      comm_state = BLACKOUT  & blackout_steps < 18             : BLACKOUT;
+      comm_state = AUTOMODE  & power_state != CRITICAL         : { AUTOMODE, DEGRADED };
+      comm_state = AUTOMODE  & power_state = CRITICAL          : AUTOMODE;
+      TRUE                                                     : comm_state;
     esac;
 
   next(pre_approved_loaded) :=
     case
-      next(comm_state) = BLACKOUT : TRUE;
-      comm_state = BLACKOUT       : TRUE;
-      comm_state = DEGRADED       : TRUE;
-      comm_state = CONNECTED      : TRUE;
-      comm_state = AUTOMODE       : pre_approved_loaded;
-      TRUE                        : pre_approved_loaded;
+      comm_state = CONNECTED                               : { TRUE, FALSE };
+      comm_state = DEGRADED & next(comm_state) = BLACKOUT  : TRUE;
+      comm_state = DEGRADED & next(comm_state) != BLACKOUT : { TRUE, FALSE };
+      comm_state = BLACKOUT                                : pre_approved_loaded;
+      comm_state = AUTOMODE & next(comm_state) = DEGRADED  : FALSE;
+      TRUE                                                 : pre_approved_loaded;
     esac;
 
   next(blackout_steps) :=
@@ -90,11 +87,11 @@ FAIRNESS comm_state != AUTOMODE
 
 
 -- =============================================================================
--- FAULTY NavModule — BUG: OBSTACLE_DETECTED skips straight to DRIVING
--- Power guards on all other states are INTACT so C1 still passes.
--- Only L1 fails because fault_active -> X(!DRIVING U SAFE_MODE) is broken.
+-- FAULTY NavModule
+-- BUG: OBSTACLE_DETECTED -> DRIVING directly when power_fault_active
+-- Extra guard added: next(power_state) != CRITICAL ensures C1 still passes
 -- =============================================================================
-MODULE NavModule(power_state, comm_state, pre_approved_loaded, power_fault_active, blackout_steps)
+MODULE NavModule(power_state, comm_state, pre_approved_loaded, power_fault_active)
 
 VAR
   nav_state         : { IDLE, DRIVING, AUTONAV, OBSTACLE_DETECTED, REPLANNING, SAFE_MODE };
@@ -112,18 +109,15 @@ ASSIGN
 
   next(nav_state) :=
     case
-      comm_state = BLACKOUT & blackout_steps >= 18
-        : IDLE;
-
+      -- AUTOMODE override — highest priority
       comm_state = AUTOMODE
         : SAFE_MODE;
 
-      -- Power guard intact — catches ALL states including IDLE
+      -- Power guard intact on ALL states — C1 must pass
       power_state = CRITICAL
         : SAFE_MODE;
 
-      nav_state = SAFE_MODE & comm_state = BLACKOUT
-        : IDLE;
+      -- SAFE_MODE exits
       nav_state = SAFE_MODE & !fault_latch
         & power_state != CRITICAL
         & comm_state != AUTOMODE & comm_state != BLACKOUT
@@ -132,29 +126,38 @@ ASSIGN
         : SAFE_MODE;
 
       -- *** BUG IS HERE ***
-      -- CORRECT would be:
-      --   nav_state = OBSTACLE_DETECTED & (power_state = CRITICAL | power_fault_active) : SAFE_MODE;
-      --   nav_state = OBSTACLE_DETECTED & comm_state = BLACKOUT                         : SAFE_MODE;
-      --   nav_state = OBSTACLE_DETECTED                                                  : REPLANNING;
-      -- FAULTY: goes straight to DRIVING — skips SAFE_MODE entirely
-      -- When power_fault_active is TRUE at OBSTACLE_DETECTED, rover drives
-      -- without ever visiting SAFE_MODE, breaking L1's Until obligation.
+      -- CORRECT would send fault_active obstacles to SAFE_MODE first:
+      --   nav_state = OBSTACLE_DETECTED & power_fault_active : SAFE_MODE;
+      --   nav_state = OBSTACLE_DETECTED : REPLANNING;
+      -- FAULTY: jumps straight to DRIVING when fault active
+      -- next(power_state) != CRITICAL guard keeps C1 passing
       nav_state = OBSTACLE_DETECTED & power_state = CRITICAL
         : SAFE_MODE;
+      nav_state = OBSTACLE_DETECTED & next(power_state) = CRITICAL
+        : SAFE_MODE;
+      nav_state = OBSTACLE_DETECTED & comm_state = BLACKOUT
+        : SAFE_MODE;
+      nav_state = OBSTACLE_DETECTED & power_fault_active
+        & next(power_state) != CRITICAL
+        : DRIVING;   -- BUG: should be SAFE_MODE, goes to DRIVING instead
       nav_state = OBSTACLE_DETECTED
-        : DRIVING;
+        : REPLANNING;
 
-      nav_state = REPLANNING & (power_state = CRITICAL | power_fault_active)
+      -- REPLANNING (correct)
+      nav_state = REPLANNING & power_state = CRITICAL
+        : SAFE_MODE;
+      nav_state = REPLANNING & power_fault_active
         : SAFE_MODE;
       nav_state = REPLANNING & comm_state = BLACKOUT
         : SAFE_MODE;
-      nav_state = REPLANNING & path_found & power_state != CRITICAL
-        & !power_fault_active & !fault_latch
+      nav_state = REPLANNING & path_found
+        & power_state != CRITICAL & !power_fault_active & !fault_latch
         & comm_state != BLACKOUT & comm_state != AUTOMODE
         : { DRIVING, AUTONAV };
       nav_state = REPLANNING
         : SAFE_MODE;
 
+      -- IDLE (correct — full power guard in place)
       nav_state = IDLE & (fault_latch | power_fault_active | power_state = CRITICAL)
         : SAFE_MODE;
       nav_state = IDLE & comm_state = BLACKOUT
@@ -167,6 +170,7 @@ ASSIGN
       nav_state = IDLE
         : IDLE;
 
+      -- DRIVING (correct)
       nav_state = DRIVING & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
       nav_state = DRIVING & comm_state = BLACKOUT
@@ -176,6 +180,7 @@ ASSIGN
       nav_state = DRIVING
         : { DRIVING, IDLE };
 
+      -- AUTONAV (correct)
       nav_state = AUTONAV & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
       nav_state = AUTONAV & comm_state = BLACKOUT
@@ -222,18 +227,20 @@ MODULE main
 
 VAR
   power : PowerModule;
-  comm  : CommModule(power.power_state, power.power_fault_active);
-  nav   : NavModule(power.power_state, comm.comm_state, comm.pre_approved_loaded,
-                    power.power_fault_active, comm.blackout_steps);
+  comm  : CommModule(power.power_state);
+  nav   : NavModule(power.power_state, comm.comm_state,
+                    comm.pre_approved_loaded, power.power_fault_active);
 
--- C1 MUST PASS — power guard on DRIVING/AUTONAV/IDLE is intact
+-- C1: MUST PASS — power guard covers all states
 SPEC AG(
   power.power_state = CRITICAL ->
   nav.nav_state != DRIVING & nav.nav_state != AUTONAV
 )
 
--- L1 WILL FAIL — lasso counterexample, look for "-- Loop starts here --"
+-- L1: WILL FAIL — lasso counterexample
+-- Once fault is active, rover must not drive until SAFE_MODE is reached
+-- Bug: OBSTACLE_DETECTED -> DRIVING with fault active, SAFE_MODE never visited first
 LTLSPEC G(
   power.power_fault_active ->
-  X((nav.nav_state != DRIVING) U (nav.nav_state = SAFE_MODE))
+  (nav.nav_state != DRIVING) U (nav.nav_state = SAFE_MODE)
 )
