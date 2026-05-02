@@ -95,15 +95,18 @@ ASSIGN
       TRUE : comm_state;
     esac;
 
+  -- [F-L3] pre_approved_loaded is TRUE in CONNECTED, DEGRADED, BLACKOUT always.
+  -- Also forced TRUE when next step is BLACKOUT (catches AUTOMODE→DEGRADED→BLACKOUT).
+  -- Never cleared from AUTOMODE — clearing caused FALSE at DEGRADED step before
+  -- BLACKOUT entry, violating L3. Only AUTOMODE self-loop preserves current value.
   next(pre_approved_loaded) :=
     case
-      next(comm_state) = BLACKOUT                          : TRUE;
-      comm_state = BLACKOUT                                : TRUE;
-      comm_state = DEGRADED                                : TRUE;
-      comm_state = CONNECTED                               : TRUE;
-      comm_state = AUTOMODE & next(comm_state) = DEGRADED : FALSE;
-      comm_state = AUTOMODE                                : pre_approved_loaded;
-      TRUE                                                 : pre_approved_loaded;
+      next(comm_state) = BLACKOUT : TRUE;
+      comm_state = BLACKOUT       : TRUE;
+      comm_state = DEGRADED       : TRUE;
+      comm_state = CONNECTED      : TRUE;
+      comm_state = AUTOMODE       : pre_approved_loaded;
+      TRUE                        : pre_approved_loaded;
     esac;
 
   next(blackout_steps) :=
@@ -156,6 +159,12 @@ ASSIGN
         : SAFE_MODE;
 
       -- ── PRIORITY 2: SAFE_MODE ─────────────────────────────────────────────
+      -- [F-L5] post_blackout_hold allows SAFE_MODE to exit to IDLE even when
+      -- power is not yet NOMINAL — this covers the case where a fault drove nav
+      -- to SAFE_MODE on the same step blackout exited.
+      nav_state = SAFE_MODE & post_blackout_hold
+        & comm_state != AUTOMODE & comm_state != BLACKOUT
+        : IDLE;
       nav_state = SAFE_MODE & power_state = NOMINAL & comm_state != BLACKOUT
         & comm_state != AUTOMODE
         : IDLE;
@@ -191,10 +200,8 @@ ASSIGN
         : SAFE_MODE;
 
       -- ── PRIORITY 5: POST-BLACKOUT HOLD [L5] ───────────────────────────────
-      -- Uses blackout_exit_pending (fires on the SAME step blackout exits) so
-      -- nav is forced to IDLE immediately when blackout ends, not one step later.
-      -- Only applies to DRIVING, AUTONAV, IDLE — never OBSTACLE/REPLANNING/SAFE_MODE.
-      -- Fault/critical exempt so L1 is not broken.
+      -- Uses blackout_exit_pending (same step as blackout exits) for DRIVING/AUTONAV/IDLE.
+      -- SAFE_MODE handled above. OBSTACLE/REPLANNING resolve naturally.
       blackout_exit_pending
         & !power_fault_active & power_state != CRITICAL
         & comm_state != AUTOMODE
@@ -225,7 +232,6 @@ ASSIGN
         : IDLE;
 
       -- ── PRIORITY 7: DRIVING ───────────────────────────────────────────────
-      -- [F-L1] Fault check BEFORE obstacle so fault always reaches SAFE_MODE.
       nav_state = DRIVING & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
       nav_state = DRIVING & obstacle_detected
@@ -241,7 +247,6 @@ ASSIGN
         : { DRIVING, IDLE };
 
       -- ── PRIORITY 8: AUTONAV ───────────────────────────────────────────────
-      -- [F-L1] Fault check BEFORE obstacle so fault always reaches SAFE_MODE.
       nav_state = AUTONAV & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
       nav_state = AUTONAV & obstacle_detected

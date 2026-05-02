@@ -39,15 +39,18 @@ ASSIGN
       TRUE : comm_state;
     esac;
 
+  -- [F-L3] pre_approved_loaded is TRUE in CONNECTED, DEGRADED, BLACKOUT always.
+  -- Also forced TRUE when next step is BLACKOUT (catches AUTOMODE→DEGRADED→BLACKOUT).
+  -- Never cleared from AUTOMODE — clearing caused FALSE at DEGRADED step before
+  -- BLACKOUT entry, violating L3. Only AUTOMODE self-loop preserves current value.
   next(pre_approved_loaded) :=
     case
-      next(comm_state) = BLACKOUT                          : TRUE;
-      comm_state = BLACKOUT                                : TRUE;
-      comm_state = DEGRADED                                : TRUE;
-      comm_state = CONNECTED                               : TRUE;
-      comm_state = AUTOMODE & next(comm_state) = DEGRADED : FALSE;
-      comm_state = AUTOMODE                                : pre_approved_loaded;
-      TRUE                                                 : pre_approved_loaded;
+      next(comm_state) = BLACKOUT : TRUE;
+      comm_state = BLACKOUT       : TRUE;
+      comm_state = DEGRADED       : TRUE;
+      comm_state = CONNECTED      : TRUE;
+      comm_state = AUTOMODE       : pre_approved_loaded;
+      TRUE                        : pre_approved_loaded;
     esac;
 
   next(blackout_steps) :=
