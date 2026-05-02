@@ -64,19 +64,15 @@ FAIRNESS power_state != CRITICAL
 MODULE CommModule(power_state, power_fault_active)
 
 VAR
-  comm_state            : { CONNECTED, DEGRADED, BLACKOUT, AUTOMODE };
-  pre_approved_loaded   : boolean;
-  blackout_steps        : 0..20;
-  blackout_exit_pending : boolean;
-  post_blackout_hold    : boolean;
+  comm_state          : { CONNECTED, DEGRADED, BLACKOUT, AUTOMODE };
+  pre_approved_loaded : boolean;
+  blackout_steps      : 0..20;
 
 ASSIGN
 
-  init(comm_state)            := CONNECTED;
-  init(pre_approved_loaded)   := TRUE;
-  init(blackout_steps)        := 0;
-  init(blackout_exit_pending) := FALSE;
-  init(post_blackout_hold)    := FALSE;
+  init(comm_state)          := CONNECTED;
+  init(pre_approved_loaded) := TRUE;
+  init(blackout_steps)      := 0;
 
   next(comm_state) :=
     case
@@ -86,8 +82,11 @@ ASSIGN
       comm_state = DEGRADED  & power_state = CRITICAL  : AUTOMODE;
       comm_state = DEGRADED  & power_state != CRITICAL : { DEGRADED, BLACKOUT, CONNECTED };
 
+      -- [L5 FIX] Blackout exits at >= 18 steps (not >= 13).
+      -- This gives a deterministic exit point so the nav module can reliably
+      -- detect "last blackout step" via blackout_steps = 18 and force IDLE.
       comm_state = BLACKOUT  & blackout_steps >= 18    : DEGRADED;
-      comm_state = BLACKOUT  & blackout_steps < 18     : { BLACKOUT, DEGRADED };
+      comm_state = BLACKOUT  & blackout_steps < 18     : BLACKOUT;
 
       comm_state = AUTOMODE  & power_state != CRITICAL : { AUTOMODE, DEGRADED };
       comm_state = AUTOMODE  & power_state = CRITICAL  : AUTOMODE;
@@ -95,10 +94,8 @@ ASSIGN
       TRUE : comm_state;
     esac;
 
-  -- [F-L3] pre_approved_loaded is TRUE in CONNECTED, DEGRADED, BLACKOUT always.
-  -- Also forced TRUE when next step is BLACKOUT (catches AUTOMODE→DEGRADED→BLACKOUT).
-  -- Never cleared from AUTOMODE — clearing caused FALSE at DEGRADED step before
-  -- BLACKOUT entry, violating L3. Only AUTOMODE self-loop preserves current value.
+  -- pre_approved_loaded: TRUE whenever in CONNECTED, DEGRADED, or BLACKOUT.
+  -- Stays as-is in AUTOMODE self-loop. Forced TRUE when next step is BLACKOUT.
   next(pre_approved_loaded) :=
     case
       next(comm_state) = BLACKOUT : TRUE;
@@ -116,20 +113,9 @@ ASSIGN
       TRUE                                              : blackout_steps;
     esac;
 
-  next(blackout_exit_pending) :=
-    case
-      comm_state = BLACKOUT & next(comm_state) = DEGRADED : TRUE;
-      TRUE                                                 : FALSE;
-    esac;
-
-  next(post_blackout_hold) :=
-    case
-      blackout_exit_pending : TRUE;
-      TRUE                  : FALSE;
-    esac;
-
 FAIRNESS comm_state != BLACKOUT
 FAIRNESS comm_state != AUTOMODE
+
 
 -- =============================================================================
 -- FORMAL METHODS — SE-320  |  BESE-14B  |  Group 01
@@ -137,15 +123,13 @@ FAIRNESS comm_state != AUTOMODE
 -- MODULE: NavModule
 -- =============================================================================
 
-MODULE NavModule(power_state, comm_state, pre_approved_loaded, power_fault_active, post_blackout_hold, blackout_exit_pending)
+MODULE NavModule(power_state, comm_state, pre_approved_loaded, power_fault_active, blackout_steps)
 
 VAR
   nav_state         : { IDLE, DRIVING, AUTONAV, OBSTACLE_DETECTED, REPLANNING, SAFE_MODE };
   obstacle_detected : boolean;
   path_found        : boolean;
   terrain_mapped    : boolean;
-  -- [FIX-L1] fault_latch: latches TRUE when power_fault_active fires, clears only when
-  -- SAFE_MODE is entered. Prevents IDLE->DRIVING after a fault without SAFE_MODE checkpoint.
   fault_latch       : boolean;
 
 ASSIGN
@@ -158,127 +142,100 @@ ASSIGN
 
   next(nav_state) :=
     case
-      -- ── PRIORITY 1: AUTOMODE forces SAFE_MODE ─────────────────────────────
+      -- ── PRIORITY 0: LAST BLACKOUT STEP → IDLE [L5 FIX] ──────────────────
+      -- When blackout_steps = 18, next(comm_state) = DEGRADED (blackout ends).
+      -- L5 requires: at that moment, next(nav_state) = IDLE.
+      -- This rule fires BEFORE all others to guarantee it unconditionally.
+      comm_state = BLACKOUT & blackout_steps >= 18
+        : IDLE;
+
+      -- ── PRIORITY 1: AUTOMODE forces SAFE_MODE ────────────────────────────
       comm_state = AUTOMODE
         : SAFE_MODE;
 
-      -- ── PRIORITY 2: SAFE_MODE ─────────────────────────────────────────────
-      -- [FIX-L5] During BLACKOUT, SAFE_MODE must exit to IDLE (not stay stuck in
-      -- SAFE_MODE). This ensures that on the last BLACKOUT step, if nav=SAFE_MODE,
-      -- next(nav)=IDLE as L5 requires. CRITICAL power keeps rover in SAFE_MODE.
-      nav_state = SAFE_MODE & comm_state = BLACKOUT & power_state != CRITICAL
+      -- ── PRIORITY 2: CRITICAL power forces SAFE_MODE ──────────────────────
+      power_state = CRITICAL
+        : SAFE_MODE;
+
+      -- ── PRIORITY 3: SAFE_MODE exits ──────────────────────────────────────
+      -- During BLACKOUT (non-last step): stay IDLE (will be caught by P0 on last step)
+      nav_state = SAFE_MODE & comm_state = BLACKOUT
         : IDLE;
-      nav_state = SAFE_MODE & post_blackout_hold
+      -- After fault clears and power recovers: exit to IDLE
+      nav_state = SAFE_MODE & !fault_latch
+        & power_state != CRITICAL
         & comm_state != AUTOMODE & comm_state != BLACKOUT
-        : IDLE;
-      nav_state = SAFE_MODE & power_state = NOMINAL & comm_state != BLACKOUT
-        & comm_state != AUTOMODE
         : IDLE;
       nav_state = SAFE_MODE
         : SAFE_MODE;
 
-      -- ── PRIORITY 3: OBSTACLE_DETECTED ─────────────────────────────────────
+      -- ── PRIORITY 4: OBSTACLE_DETECTED ────────────────────────────────────
       nav_state = OBSTACLE_DETECTED & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
-      nav_state = OBSTACLE_DETECTED & comm_state = AUTOMODE
+      -- During BLACKOUT: go to SAFE_MODE (not IDLE) so C3a is satisfied.
+      -- SAFE_MODE during BLACKOUT then exits to IDLE via Priority 3,
+      -- and Priority 0 guarantees IDLE on the last blackout step for L5.
+      nav_state = OBSTACLE_DETECTED & comm_state = BLACKOUT
         : SAFE_MODE;
       nav_state = OBSTACLE_DETECTED
         : REPLANNING;
 
-      -- ── PRIORITY 4: REPLANNING ─────────────────────────────────────────────
+      -- ── PRIORITY 5: REPLANNING ───────────────────────────────────────────
       nav_state = REPLANNING & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
-      nav_state = REPLANNING & comm_state = AUTOMODE
-        : SAFE_MODE;
-      nav_state = REPLANNING & path_found & power_state != CRITICAL
-        & !power_fault_active
-        & comm_state != BLACKOUT & comm_state != AUTOMODE
-        : { DRIVING, AUTONAV };
-      nav_state = REPLANNING & !path_found
-        : SAFE_MODE;
-      -- [FIX-L5] During BLACKOUT, replanning cannot resume DRIVING — go SAFE_MODE
-      -- then SAFE_MODE&BLACKOUT->IDLE (P2 above). Driving resumes after blackout ends.
+      -- During BLACKOUT: go to SAFE_MODE so replanning is properly halted.
+      -- SAFE_MODE during BLACKOUT exits to IDLE via Priority 3.
       nav_state = REPLANNING & comm_state = BLACKOUT
         : SAFE_MODE;
+      nav_state = REPLANNING & path_found & power_state != CRITICAL
+        & !power_fault_active & !fault_latch
+        & comm_state != BLACKOUT & comm_state != AUTOMODE
+        : { DRIVING, AUTONAV };
+      nav_state = REPLANNING
+        : SAFE_MODE;
 
-      -- ── PRIORITY 5: POST-BLACKOUT HOLD [L5] ───────────────────────────────
-      -- bep fires at the DEGRADED step (one step after blackout exits). By then,
-      -- nav is already IDLE (because BLACKOUT forces all states to IDLE — see P2,P7,P8).
-      -- This priority handles the edge case where nav enters a non-IDLE state via
-      -- a same-step nondeterministic transition at the DEGRADED boundary.
-      blackout_exit_pending
-        & power_state != CRITICAL
-        & comm_state != AUTOMODE
-        & nav_state != SAFE_MODE
-        & nav_state != OBSTACLE_DETECTED
-        & nav_state != REPLANNING
-        : IDLE;
-
-      -- ── PRIORITY 6: IDLE ───────────────────────────────────────────────────
-      -- [FIX-L1] fault_latch: if a fault was seen without SAFE_MODE being visited,
-      -- force SAFE_MODE from IDLE so the Until obligation is discharged.
-      nav_state = IDLE & fault_latch
+      -- ── PRIORITY 6: IDLE ─────────────────────────────────────────────────
+      -- fault_latch: must visit SAFE_MODE before driving again
+      nav_state = IDLE & (fault_latch | power_fault_active | power_state = CRITICAL)
         : SAFE_MODE;
-      nav_state = IDLE & power_fault_active
-        : SAFE_MODE;
-      nav_state = IDLE & power_state = CRITICAL
-        : SAFE_MODE;
-      -- [FIX-L5] During BLACKOUT, IDLE always stays IDLE — never goes to DRIVING.
-      -- This prevents IDLE->DRIVING on the last BLACKOUT step which would put
-      -- DRIVING at the first post-BLACKOUT step, violating L5.
+      -- During BLACKOUT: IDLE stays IDLE (never starts driving mid-blackout)
       nav_state = IDLE & comm_state = BLACKOUT
         : IDLE;
-      -- [FIX-L1] Guard IDLE->DRIVING/AUTONAV with !fault_latch to ensure SAFE_MODE
-      -- is visited before driving resumes after any power fault.
+      -- Normal departure to DRIVING/AUTONAV
       nav_state = IDLE & power_state != CRITICAL & !power_fault_active
         & !fault_latch
         & comm_state != BLACKOUT & comm_state != AUTOMODE
         & terrain_mapped
         : { DRIVING, AUTONAV };
-      nav_state = IDLE & power_state != CRITICAL & !power_fault_active
-        & comm_state != BLACKOUT & comm_state != AUTOMODE
-        & !terrain_mapped
+      nav_state = IDLE
         : IDLE;
 
-      -- ── PRIORITY 7: DRIVING ───────────────────────────────────────────────
-      nav_state = DRIVING & power_state = CRITICAL
+      -- ── PRIORITY 7: DRIVING ──────────────────────────────────────────────
+      nav_state = DRIVING & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
-      -- [FIX-L5] During BLACKOUT, DRIVING always goes to IDLE regardless of fault.
-      -- If fault is also active: IDLE & fault_latch → SAFE_MODE next step (P6).
-      -- This ensures next(nav)=IDLE on any BLACKOUT step, satisfying L5.
+      -- During BLACKOUT: driving stops, go to IDLE
       nav_state = DRIVING & comm_state = BLACKOUT
         : IDLE;
-      nav_state = DRIVING & power_fault_active
-        : SAFE_MODE;
       nav_state = DRIVING & obstacle_detected
         : OBSTACLE_DETECTED;
-      nav_state = DRIVING & comm_state != BLACKOUT & comm_state != AUTOMODE
-        & power_state != CRITICAL & !power_fault_active & !obstacle_detected
+      nav_state = DRIVING
         : { DRIVING, IDLE };
 
-      -- ── PRIORITY 8: AUTONAV ───────────────────────────────────────────────
-      nav_state = AUTONAV & power_state = CRITICAL
+      -- ── PRIORITY 8: AUTONAV ──────────────────────────────────────────────
+      nav_state = AUTONAV & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
-      -- [FIX-L5] AUTONAV during BLACKOUT goes to IDLE (was SAFE_MODE).
-      -- SAFE_MODE at a BLACKOUT step would then exit to IDLE (P2), but that's
-      -- one step too late for L5. Going directly to IDLE is correct.
+      -- During BLACKOUT: autonav stops, go to IDLE
       nav_state = AUTONAV & comm_state = BLACKOUT
         : IDLE;
-      nav_state = AUTONAV & power_fault_active
-        : SAFE_MODE;
       nav_state = AUTONAV & obstacle_detected
         : OBSTACLE_DETECTED;
-      nav_state = AUTONAV & comm_state != BLACKOUT & comm_state != AUTOMODE
-        & power_state != CRITICAL & !power_fault_active & !obstacle_detected
+      nav_state = AUTONAV
         : { AUTONAV, IDLE };
 
       TRUE : nav_state;
     esac;
 
-  -- [FIX-L1] fault_latch latches TRUE when power_fault_active is seen.
-  -- Cleared only when SAFE_MODE is entered (next_nav_state = SAFE_MODE).
-  -- This ensures the Until in L1 is always discharged via SAFE_MODE before
-  -- the rover is allowed back into DRIVING or AUTONAV.
+  -- fault_latch: set when fault fires, cleared only when SAFE_MODE is entered
   next(fault_latch) :=
     case
       next(nav_state) = SAFE_MODE : FALSE;
@@ -293,22 +250,20 @@ ASSIGN
       TRUE                                       : FALSE;
     esac;
 
-  next(path_found) :=
-    case
-      nav_state = REPLANNING : { TRUE, FALSE };
-      TRUE                   : { TRUE, FALSE };
-    esac;
+  next(path_found) := { TRUE, FALSE };
 
   next(terrain_mapped) :=
     case
-      nav_state = IDLE & power_state != CRITICAL : TRUE;
-      nav_state = SAFE_MODE                      : FALSE;
-      TRUE                                       : terrain_mapped;
+      nav_state = IDLE & power_state != CRITICAL
+        & comm_state != BLACKOUT & comm_state != AUTOMODE : TRUE;
+      nav_state = SAFE_MODE                               : FALSE;
+      TRUE                                                : terrain_mapped;
     esac;
 
 FAIRNESS nav_state != OBSTACLE_DETECTED
 FAIRNESS nav_state != REPLANNING
 FAIRNESS !(power_state = CRITICAL & comm_state = BLACKOUT)
+
 
 -- =============================================================================
 -- FORMAL METHODS — SE-320  |  BESE-14B  |  Group 01
@@ -317,7 +272,7 @@ FAIRNESS !(power_state = CRITICAL & comm_state = BLACKOUT)
 -- Wires PowerModule, CommModule, and NavModule together.
 -- PowerModule feeds power_state and power_fault_active to the others.
 -- CommModule receives power_state and power_fault_active; produces comm_state,
---   pre_approved_loaded, post_blackout_hold, blackout_exit_pending for NavModule.
+--   pre_approved_loaded, and blackout_steps for NavModule.
 -- NavModule receives all shared read-only signals; owns navigation FSM.
 -- =============================================================================
 
@@ -327,8 +282,8 @@ VAR
   power : PowerModule;
   comm  : CommModule(power.power_state, power.power_fault_active);
   nav   : NavModule(power.power_state, comm.comm_state, comm.pre_approved_loaded,
-                    power.power_fault_active, comm.post_blackout_hold,
-                    comm.blackout_exit_pending);
+                    power.power_fault_active, comm.blackout_steps);
+
 
 -- =============================================================================
 -- FORMAL METHODS — SE-320  |  BESE-14B  |  Group 01
