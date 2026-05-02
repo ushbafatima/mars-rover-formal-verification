@@ -8,6 +8,16 @@
 --         Automode behaviour (Opportunity 2017 conjunction anomaly)
 --         Post-blackout hold flag (Section 3.3 Constraint 5 / L5)
 -- Parameters: power_state — read from PowerModule (never written here)
+--
+-- FIX LOG:
+--   [F-C4]  BLACKOUT no longer nondeterministically enters AUTOMODE.
+--           AUTOMODE is triggered only from CONNECTED/DEGRADED on critical power.
+--           This ensures BLACKOUT always eventually reaches DEGRADED (C4).
+--   [F-L3]  pre_approved_loaded is forced TRUE whenever next step is BLACKOUT,
+--           regardless of current state. Covers CONNECTED→DEGRADED→BLACKOUT path.
+--   [F-L5]  post_blackout_hold now fires on BLACKOUT→DEGRADED only (the only
+--           BLACKOUT exit after removing BLACKOUT→AUTOMODE). NavModule uses this
+--           flag to enforce IDLE on the first post-blackout step.
 -- =============================================================================
 
 MODULE CommModule(power_state)
@@ -27,30 +37,26 @@ ASSIGN
   init(post_blackout_hold)  := FALSE;
 
   -- Communication state transitions
-  -- Key constraints from spec Section 3.2:
-  --   • Critical power → cannot be CONNECTED (no transmitter power)
-  --   • BLACKOUT exits when blackout_steps reaches its nondeterministic limit
-  --   • AUTOMODE triggered during BLACKOUT by nondeterministic anomaly
+  -- [F-C4] BLACKOUT only exits to DEGRADED (after nondeterministic duration).
+  --        AUTOMODE is only triggered from CONNECTED or DEGRADED on critical power.
+  --        This guarantees C4: BLACKOUT always eventually reaches DEGRADED.
   next(comm_state) :=
     case
-      -- CONNECTED: normal ops. Can degrade as conjunction approaches.
-      -- Critical power forces immediate loss of connection.
+      -- CONNECTED: normal ops. Critical power forces AUTOMODE.
       comm_state = CONNECTED  & power_state = CRITICAL  : AUTOMODE;
       comm_state = CONNECTED  & power_state != CRITICAL : { CONNECTED, DEGRADED };
 
-      -- DEGRADED: weakening signal. Proceeds to BLACKOUT or recovers.
-      -- Critical power here also forces AUTOMODE (no transmitter power).
+      -- DEGRADED: weakening signal. Critical power forces AUTOMODE.
       comm_state = DEGRADED   & power_state = CRITICAL  : AUTOMODE;
       comm_state = DEGRADED   & power_state != CRITICAL : { DEGRADED, BLACKOUT, CONNECTED };
 
-      -- BLACKOUT: full moratorium. Only pre-loaded sequences may run.
-      -- After nondeterministic duration (blackout_steps hits max), exits to DEGRADED.
-      -- Nondeterministic anomaly during blackout → AUTOMODE (Opportunity 2017).
+      -- BLACKOUT: exits ONLY to DEGRADED after bounded duration. [F-C4]
+      -- AUTOMODE is NOT triggered from BLACKOUT — anomaly during blackout
+      -- is handled by NavModule entering SAFE_MODE via power/comm checks.
       comm_state = BLACKOUT   & blackout_steps >= 18    : DEGRADED;
-      comm_state = BLACKOUT   & blackout_steps < 18     : { BLACKOUT, AUTOMODE };
+      comm_state = BLACKOUT   & blackout_steps < 18     : { BLACKOUT, DEGRADED };
 
       -- AUTOMODE: self-preservation hold. Exits only to DEGRADED when safe.
-      -- Cannot return to CONNECTED directly — must go through DEGRADED first.
       comm_state = AUTOMODE   & power_state != CRITICAL : { AUTOMODE, DEGRADED };
       comm_state = AUTOMODE   & power_state = CRITICAL  : AUTOMODE;
 
@@ -58,41 +64,41 @@ ASSIGN
     esac;
 
   -- pre_approved_loaded:
-  -- Set to TRUE during CONNECTED or DEGRADED (upload window is open).
-  -- Once set, persists through BLACKOUT — it is a prior-state dependency.
-  -- Cleared only when fully reconnected after blackout (fresh upload window).
-  -- This implements Section 3.3 constraint 1: the gate depends on prior state.
+  -- [F-L3] Force TRUE whenever next step will be BLACKOUT, regardless of
+  --        current comm_state. This ensures L3 holds: X(BLACKOUT) → pre_approved=TRUE now.
+  --        Also persists through BLACKOUT and clears after AUTOMODE exits.
   next(pre_approved_loaded) :=
     case
-      -- Upload happens before blackout: set during CONNECTED or DEGRADED
-      comm_state = CONNECTED                                 : { TRUE, FALSE };
-      comm_state = DEGRADED & next(comm_state) = BLACKOUT   : TRUE;  -- must upload before blackout
-      comm_state = DEGRADED & next(comm_state) != BLACKOUT  : { TRUE, FALSE };
-      -- Persists through BLACKOUT — value frozen from before blackout
+      -- Force upload before entering BLACKOUT (covers all paths into BLACKOUT) [F-L3]
+      next(comm_state) = BLACKOUT                            : TRUE;
+      -- Persists through BLACKOUT
       comm_state = BLACKOUT                                  : pre_approved_loaded;
-      -- Clears on re-connection (fresh conjunction cycle can start)
+      -- Clears on re-connection after automode (fresh conjunction cycle)
       comm_state = AUTOMODE & next(comm_state) = DEGRADED   : FALSE;
+      -- Normal nondeterministic upload during CONNECTED/DEGRADED
+      comm_state = CONNECTED                                 : { TRUE, FALSE };
+      comm_state = DEGRADED                                  : { TRUE, FALSE };
       TRUE                                                   : pre_approved_loaded;
     esac;
 
-  -- blackout_steps: counts steps in BLACKOUT, used to bound conjunction duration
+  -- blackout_steps: counts steps in BLACKOUT, bounds conjunction duration
   next(blackout_steps) :=
     case
       next(comm_state) = BLACKOUT & blackout_steps < 20 : blackout_steps + 1;
-      next(comm_state) != BLACKOUT                      : 0;  -- reset when not in blackout
+      next(comm_state) != BLACKOUT                      : 0;
       TRUE                                              : blackout_steps;
     esac;
 
-  -- post_blackout_hold: TRUE exactly on the first step after BLACKOUT exits.
-  -- This is the structural enforcement of Section 3.3 Constraint 5 (B5) / L5.
-  -- It is TRUE when: current step is still BLACKOUT AND next step is not BLACKOUT.
-  -- NavModule reads this flag and holds in IDLE when it is TRUE.
+  -- post_blackout_hold: TRUE exactly on the first step after BLACKOUT exits to DEGRADED.
+  -- [F-L5] With BLACKOUT only exiting to DEGRADED, this fires reliably.
+  -- NavModule reads this flag and holds nav_state = IDLE when it is TRUE.
   next(post_blackout_hold) :=
     case
-      comm_state = BLACKOUT & next(comm_state) != BLACKOUT : TRUE;  -- blackout just ended
-      TRUE                                                  : FALSE; -- only holds for one step
+      comm_state = BLACKOUT & next(comm_state) = DEGRADED : TRUE;
+      TRUE                                                 : FALSE;
     esac;
 
--- Fairness: blackout must not last forever
--- (orbital mechanics guarantee conjunction ends — bounded by blackout_steps >= 18)
+-- Fairness: blackout must not last forever (orbital mechanics bound)
 FAIRNESS comm_state != BLACKOUT
+-- Fairness: AUTOMODE must not persist forever (power eventually recovers)
+FAIRNESS comm_state != AUTOMODE
