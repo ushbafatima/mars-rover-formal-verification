@@ -1,0 +1,44 @@
+-- =============================================================================
+-- FORMAL METHODS — SE-320  |  BESE-14B  |  Group 01
+-- FILE: 01_power.smv
+-- MODULE: PowerModule
+-- Owns: power_state, power_fault_active
+-- Models: Curiosity fault protection engine (1000+ monitors, 39 responses)
+--         Opportunity 22 Wh critical threshold
+--         RTG + lithium-ion gradual degradation (no NOMINAL→CRITICAL jump)
+-- =============================================================================
+
+MODULE PowerModule
+
+VAR
+  power_state      : { NOMINAL, LOW, CRITICAL };
+  power_fault_active : boolean;
+
+ASSIGN
+
+  -- Initial state: full power, no fault
+  init(power_state)        := NOMINAL;
+  init(power_fault_active) := FALSE;
+
+  -- Power degrades nondeterministically but NEVER jumps NOMINAL→CRITICAL in one step
+  -- (L2 enforces this; transitions also explicitly prevent it)
+  -- Recovery: can only improve one level per step (models battery charge rate limit)
+  next(power_state) :=
+    case
+      power_state = NOMINAL  : { NOMINAL, LOW };           -- can stay or worsen one step
+      power_state = LOW      : { LOW, CRITICAL, NOMINAL }; -- can recover, stay, or worsen
+      power_state = CRITICAL : { CRITICAL, LOW };          -- can only recover one level
+    esac;
+
+  -- Fault protection engine activates when power reaches LOW or CRITICAL
+  -- Clears only when power returns to NOMINAL (full health check)
+  next(power_fault_active) :=
+    case
+      next(power_state) = NOMINAL  : FALSE;
+      next(power_state) = LOW      : TRUE;
+      next(power_state) = CRITICAL : TRUE;
+    esac;
+
+-- Fairness: power must not stay CRITICAL forever
+-- (models RTG eventually recharging batteries — Opportunity autonomous wake-up)
+FAIRNESS power_state != CRITICAL

@@ -1,0 +1,131 @@
+-- =============================================================================
+-- FORMAL METHODS — SE-320  |  BESE-14B  |  Group 01
+-- FILE: 05_properties.smv
+-- All 11 formal properties: C1–C6 (CTL via SPEC) + L1–L5 (LTL via LTLSPEC)
+--
+-- CTL  (SPEC)   — branching-time: AG/AF over the full computation tree.
+--                 Used for state invariants and branching liveness.
+-- LTL  (LTLSPEC)— linear-time: G/X/U over individual execution paths.
+--                 Used for sequencing, transition constraints, protocol ordering.
+-- Both logics are incomparable in expressive power; using both gives strictly
+-- more complete verification than either alone.
+-- =============================================================================
+
+
+-- -----------------------------------------------------------------------------
+-- CTL PROPERTIES  (SPEC keyword)
+-- Verified using symbolic model checking over the computation tree
+-- -----------------------------------------------------------------------------
+
+-- C1: Power Gate on Locomotion (Safety)
+-- Critical power → rover is never DRIVING or AUTONAV
+-- Cross-module invariant: PowerModule state gates NavModule transitions
+-- NASA basis: Curiosity fault engine; Opportunity 22 Wh shutdown
+SPEC AG(
+  power.power_state = CRITICAL ->
+  nav.nav_state != DRIVING & nav.nav_state != AUTONAV
+)
+
+-- C2: Blackout Command Gate (Safety)
+-- During BLACKOUT, any driving requires pre-approved commands loaded
+-- NASA basis: Curiosity 2023 conjunction; Opportunity moratorium
+SPEC AG(
+  comm.comm_state = BLACKOUT & nav.nav_state = DRIVING ->
+  comm.pre_approved_loaded = TRUE
+)
+
+-- C3a: Obstacle Detection Eventually Resolved — Part 1 (Liveness)
+-- Obstacle detection always leads to REPLANNING or SAFE_MODE (never a deadlock)
+-- NASA basis: ENav path planner always terminates
+SPEC AG(
+  nav.nav_state = OBSTACLE_DETECTED ->
+  AF(nav.nav_state = REPLANNING | nav.nav_state = SAFE_MODE)
+)
+
+-- C3b: Obstacle Detection Eventually Resolved — Part 2 (Liveness)
+-- Replanning always terminates: either resumes drive or enters safe mode
+-- NASA basis: ENav two-stage decision: path found or stop
+SPEC AG(
+  nav.nav_state = REPLANNING ->
+  AF(nav.nav_state = DRIVING | nav.nav_state = AUTONAV | nav.nav_state = SAFE_MODE)
+)
+
+-- C4: Conjunction Always Ends (Liveness)
+-- BLACKOUT always eventually transitions to DEGRADED or CONNECTED
+-- blackout_steps counter bounds this to max 18 steps
+-- NASA basis: orbital mechanics — conjunction bounded ~18 days
+SPEC AG(
+  comm.comm_state = BLACKOUT ->
+  AF(comm.comm_state = DEGRADED | comm.comm_state = CONNECTED)
+)
+
+-- C5: Full Conjunction Safety Protocol (Composite Safety)
+-- All three conditions must hold simultaneously during any blackout movement
+-- Strongest safety property: catches violations of any individual constraint
+-- NASA basis: full conjunction protocol across all 3 modules
+SPEC AG(
+  comm.comm_state = BLACKOUT &
+  (nav.nav_state = DRIVING | nav.nav_state = AUTONAV) ->
+  nav.terrain_mapped = TRUE &
+  power.power_state != CRITICAL &
+  comm.pre_approved_loaded = TRUE
+)
+
+-- C6: Autonomous Power Recovery During Blackout (Liveness)
+-- Critical power during blackout → eventually recovers autonomously
+-- NASA basis: Opportunity clock-based autonomous battery wake-up protocol
+SPEC AG(
+  power.power_state = CRITICAL & comm.comm_state = BLACKOUT ->
+  AF(power.power_state = LOW | power.power_state = NOMINAL)
+)
+
+
+-- -----------------------------------------------------------------------------
+-- LTL PROPERTIES  (LTLSPEC keyword)
+-- Verified using bounded/unbounded LTL model checking over linear paths
+-- NuSMV produces lasso-shaped counterexamples (prefix + loop) for LTL violations
+-- -----------------------------------------------------------------------------
+
+-- L1: Safe Mode Must Precede Drive Resumption After Fault (Until — Sequencing)
+-- Once a power fault is active, the rover must NOT drive until SAFE_MODE is reached
+-- Uses Until (U) — expressible only in LTL, not CTL
+-- NASA basis: Curiosity — safe mode required hold before any resumption
+LTLSPEC G(
+  power.power_fault_active ->
+  (nav.nav_state != DRIVING) U (nav.nav_state = SAFE_MODE)
+)
+
+-- L2: No Power Jump from NOMINAL to CRITICAL in One Step (Next — Transition)
+-- Power must degrade gradually: NOMINAL → LOW → CRITICAL
+-- Uses X (Next) — expressible only in LTL, not CTL
+-- NASA basis: RTG + battery chemistry; gradual degradation only
+LTLSPEC G(
+  power.power_state = NOMINAL -> X(power.power_state != CRITICAL)
+)
+
+-- L3: Pre-Approved Commands Loaded Before Blackout Entry (Next — Pre-condition)
+-- If the next step is BLACKOUT, pre_approved_loaded must be TRUE right now
+-- Stronger than C2: catches failure to pre-load even if rover never drives
+-- NASA basis: Perseverance 2021 — upload closes at blackout entry
+LTLSPEC G(
+  X(comm.comm_state = BLACKOUT) -> comm.pre_approved_loaded = TRUE
+)
+
+-- L4: AUTOMODE Enforces Minimum One-Step Non-Driving Hold (Next — Hold State)
+-- When AUTOMODE is active, the rover cannot be driving at the very next step
+-- Catches zero-duration passthrough AUTOMODE implementations
+-- NASA basis: Opportunity 2017 — automode sustained, not passthrough
+LTLSPEC G(
+  comm.comm_state = AUTOMODE ->
+  X(nav.nav_state != DRIVING & nav.nav_state != AUTONAV)
+)
+
+-- L5: Post-Blackout First Step Must Be IDLE (Transition Ordering)
+-- Directly verifies Section 3.3 Constraint 5: post-blackout delay
+-- When blackout ends (this step = BLACKOUT, next step != BLACKOUT),
+-- the rover must be in IDLE at that first post-blackout step
+-- NASA basis: post-conjunction hold documented in Space.com Nov 2023 report
+LTLSPEC G(
+  comm.comm_state = BLACKOUT & X(comm.comm_state != BLACKOUT) ->
+  X(nav.nav_state = IDLE)
+)
