@@ -3,14 +3,15 @@
 -- FAULTY MODEL A — CTL Counterexample Demonstration
 -- Demonstrates violation of C1: Power Gate on Locomotion
 --
--- BUG INTRODUCED: In NavModule, the power check guards are removed from the
--- IDLE state. The rover can now transition IDLE→DRIVING even when
--- power_state = CRITICAL, violating the C1 safety invariant.
+-- BUG INTRODUCED: The global power_state = CRITICAL -> SAFE_MODE guard is
+-- weakened: it only catches DRIVING and AUTONAV states, not IDLE.
+-- So the rover can transition IDLE -> DRIVING when power_state = CRITICAL,
+-- violating the C1 safety invariant.
 --
 -- Expected output:
 --   -- specification AG (power.power_state = CRITICAL ->
 --        nav.nav_state != DRIVING & nav.nav_state != AUTONAV) is false
---   Trace Type: Counterexample (FINITE PATH — no loop)
+--   Trace Type: Counterexample (FINITE PATH)
 -- =============================================================================
 
 MODULE PowerModule
@@ -44,18 +45,14 @@ FAIRNESS power_state != CRITICAL
 MODULE CommModule(power_state, power_fault_active)
 
 VAR
-  comm_state            : { CONNECTED, DEGRADED, BLACKOUT, AUTOMODE };
-  pre_approved_loaded   : boolean;
-  blackout_steps        : 0..20;
-  blackout_exit_pending : boolean;
-  post_blackout_hold    : boolean;
+  comm_state          : { CONNECTED, DEGRADED, BLACKOUT, AUTOMODE };
+  pre_approved_loaded : boolean;
+  blackout_steps      : 0..20;
 
 ASSIGN
-  init(comm_state)            := CONNECTED;
-  init(pre_approved_loaded)   := TRUE;
-  init(blackout_steps)        := 0;
-  init(blackout_exit_pending) := FALSE;
-  init(post_blackout_hold)    := FALSE;
+  init(comm_state)          := CONNECTED;
+  init(pre_approved_loaded) := TRUE;
+  init(blackout_steps)      := 0;
 
   next(comm_state) :=
     case
@@ -64,7 +61,7 @@ ASSIGN
       comm_state = DEGRADED  & power_state = CRITICAL  : AUTOMODE;
       comm_state = DEGRADED  & power_state != CRITICAL : { DEGRADED, BLACKOUT, CONNECTED };
       comm_state = BLACKOUT  & blackout_steps >= 18    : DEGRADED;
-      comm_state = BLACKOUT  & blackout_steps < 18     : { BLACKOUT, DEGRADED };
+      comm_state = BLACKOUT  & blackout_steps < 18     : BLACKOUT;
       comm_state = AUTOMODE  & power_state != CRITICAL : { AUTOMODE, DEGRADED };
       comm_state = AUTOMODE  & power_state = CRITICAL  : AUTOMODE;
       TRUE : comm_state;
@@ -87,27 +84,15 @@ ASSIGN
       TRUE                                              : blackout_steps;
     esac;
 
-  next(blackout_exit_pending) :=
-    case
-      comm_state = BLACKOUT & next(comm_state) = DEGRADED : TRUE;
-      TRUE                                                 : FALSE;
-    esac;
-
-  next(post_blackout_hold) :=
-    case
-      blackout_exit_pending : TRUE;
-      TRUE                  : FALSE;
-    esac;
-
 FAIRNESS comm_state != BLACKOUT
 FAIRNESS comm_state != AUTOMODE
 
 
 -- =============================================================================
--- FAULTY NavModule — BUG: power check removed from IDLE transitions
--- The rover can now depart IDLE→DRIVING even when power_state = CRITICAL
+-- FAULTY NavModule — BUG: priority 2 only guards DRIVING/AUTONAV, not IDLE
+-- So IDLE can still depart to DRIVING when power_state = CRITICAL
 -- =============================================================================
-MODULE NavModule(power_state, comm_state, pre_approved_loaded, power_fault_active, post_blackout_hold, blackout_exit_pending)
+MODULE NavModule(power_state, comm_state, pre_approved_loaded, power_fault_active, blackout_steps)
 
 VAR
   nav_state         : { IDLE, DRIVING, AUTONAV, OBSTACLE_DETECTED, REPLANNING, SAFE_MODE };
@@ -125,26 +110,29 @@ ASSIGN
 
   next(nav_state) :=
     case
+      comm_state = BLACKOUT & blackout_steps >= 18
+        : IDLE;
+
       comm_state = AUTOMODE
         : SAFE_MODE;
 
+      -- *** BUG IS HERE ***
+      -- CORRECT would be:
+      --   power_state = CRITICAL : SAFE_MODE;   (catches ALL states including IDLE)
+      -- FAULTY: only catches DRIVING and AUTONAV — IDLE is NOT protected
       power_state = CRITICAL & (nav_state = DRIVING | nav_state = AUTONAV)
         : SAFE_MODE;
 
-      nav_state = SAFE_MODE & comm_state = BLACKOUT & power_state != CRITICAL
+      nav_state = SAFE_MODE & comm_state = BLACKOUT
         : IDLE;
-      nav_state = SAFE_MODE & post_blackout_hold
+      nav_state = SAFE_MODE & !fault_latch
+        & power_state != CRITICAL
         & comm_state != AUTOMODE & comm_state != BLACKOUT
-        : IDLE;
-      nav_state = SAFE_MODE & power_state = NOMINAL & comm_state != BLACKOUT
-        & comm_state != AUTOMODE
         : IDLE;
       nav_state = SAFE_MODE
         : SAFE_MODE;
 
       nav_state = OBSTACLE_DETECTED & (power_state = CRITICAL | power_fault_active)
-        : SAFE_MODE;
-      nav_state = OBSTACLE_DETECTED & comm_state = AUTOMODE
         : SAFE_MODE;
       nav_state = OBSTACLE_DETECTED & comm_state = BLACKOUT
         : SAFE_MODE;
@@ -153,71 +141,43 @@ ASSIGN
 
       nav_state = REPLANNING & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
-      nav_state = REPLANNING & comm_state = AUTOMODE
-        : SAFE_MODE;
-      nav_state = REPLANNING & path_found & power_state != CRITICAL
-        & !power_fault_active
-        & comm_state != BLACKOUT & comm_state != AUTOMODE
-        : { DRIVING, AUTONAV };
-      nav_state = REPLANNING & !path_found
-        : SAFE_MODE;
       nav_state = REPLANNING & comm_state = BLACKOUT
         : SAFE_MODE;
-
-      blackout_exit_pending
-        & power_state != CRITICAL
-        & comm_state != AUTOMODE
-        & nav_state != SAFE_MODE
-        & nav_state != OBSTACLE_DETECTED
-        & nav_state != REPLANNING
-        : IDLE;
-
-      -- *** BUG IS HERE ***
-      -- ORIGINAL correct transitions:
-      --   nav_state = IDLE & fault_latch       : SAFE_MODE;
-      --   nav_state = IDLE & power_fault_active : SAFE_MODE;
-      --   nav_state = IDLE & power_state = CRITICAL : SAFE_MODE;  <-- REMOVED
-      --   nav_state = IDLE & comm_state = BLACKOUT  : IDLE;
-      --   nav_state = IDLE & power_state != CRITICAL & !power_fault_active
-      --     & !fault_latch & comm_state != BLACKOUT & comm_state != AUTOMODE
-      --     & terrain_mapped : { DRIVING, AUTONAV };
-      --
-      -- FAULTY: power_state = CRITICAL check removed, rover can drive on critical power
-      nav_state = IDLE & fault_latch
+      nav_state = REPLANNING & path_found & power_state != CRITICAL
+        & !power_fault_active & !fault_latch
+        & comm_state != BLACKOUT & comm_state != AUTOMODE
+        : { DRIVING, AUTONAV };
+      nav_state = REPLANNING
         : SAFE_MODE;
-      nav_state = IDLE & power_fault_active
+
+      -- IDLE has no power_state = CRITICAL guard — can depart to DRIVING freely
+      nav_state = IDLE & (fault_latch | power_fault_active)
         : SAFE_MODE;
       nav_state = IDLE & comm_state = BLACKOUT
         : IDLE;
-      nav_state = IDLE & !fault_latch & comm_state != BLACKOUT
-        & comm_state != AUTOMODE & terrain_mapped
+      nav_state = IDLE & !fault_latch & !power_fault_active
+        & comm_state != BLACKOUT & comm_state != AUTOMODE
+        & terrain_mapped
         : { DRIVING, AUTONAV };
-      nav_state = IDLE & comm_state != BLACKOUT & comm_state != AUTOMODE
-        & !terrain_mapped
+      nav_state = IDLE
         : IDLE;
 
-      nav_state = DRIVING & power_state = CRITICAL
+      nav_state = DRIVING & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
       nav_state = DRIVING & comm_state = BLACKOUT
         : IDLE;
-      nav_state = DRIVING & power_fault_active
-        : SAFE_MODE;
       nav_state = DRIVING & obstacle_detected
         : OBSTACLE_DETECTED;
-      nav_state = DRIVING & comm_state != BLACKOUT & comm_state != AUTOMODE
-        & power_state != CRITICAL & !power_fault_active & !obstacle_detected
+      nav_state = DRIVING
         : { DRIVING, IDLE };
 
-      nav_state = AUTONAV & power_state = CRITICAL
+      nav_state = AUTONAV & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
       nav_state = AUTONAV & comm_state = BLACKOUT
         : IDLE;
-      nav_state = AUTONAV & power_fault_active
-        : SAFE_MODE;
       nav_state = AUTONAV & obstacle_detected
         : OBSTACLE_DETECTED;
-      nav_state = AUTONAV & comm_state != BLACKOUT & comm_state != AUTOMODE
-        & power_state != CRITICAL & !power_fault_active & !obstacle_detected
+      nav_state = AUTONAV
         : { AUTONAV, IDLE };
 
       TRUE : nav_state;
@@ -241,9 +201,10 @@ ASSIGN
 
   next(terrain_mapped) :=
     case
-      nav_state = IDLE & power_state != CRITICAL : TRUE;
-      nav_state = SAFE_MODE                      : FALSE;
-      TRUE                                       : terrain_mapped;
+      nav_state = IDLE & power_state != CRITICAL
+        & comm_state != BLACKOUT & comm_state != AUTOMODE : TRUE;
+      nav_state = SAFE_MODE                               : FALSE;
+      TRUE                                                : terrain_mapped;
     esac;
 
 FAIRNESS nav_state != OBSTACLE_DETECTED
@@ -258,10 +219,9 @@ VAR
   power : PowerModule;
   comm  : CommModule(power.power_state, power.power_fault_active);
   nav   : NavModule(power.power_state, comm.comm_state, comm.pre_approved_loaded,
-                    power.power_fault_active, comm.post_blackout_hold,
-                    comm.blackout_exit_pending);
+                    power.power_fault_active, comm.blackout_steps);
 
--- C1 WILL FAIL — rover can drive on critical power
+-- C1 WILL FAIL — rover departs IDLE->DRIVING on critical power
 SPEC AG(
   power.power_state = CRITICAL ->
   nav.nav_state != DRIVING & nav.nav_state != AUTONAV
