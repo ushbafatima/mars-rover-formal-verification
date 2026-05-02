@@ -5,7 +5,7 @@
 --
 -- BUG: OBSTACLE_DETECTED skips straight to DRIVING instead of REPLANNING.
 -- When power_fault_active=TRUE, rover drives without visiting SAFE_MODE,
--- violating L1's Until obligation: fault_active -> !DRIVING U SAFE_MODE
+-- violating L1's Until obligation: fault_active -> X(!DRIVING U SAFE_MODE)
 --
 -- Expected output:
 --   C1 → true  (power guard covers all states)
@@ -40,7 +40,7 @@ FAIRNESS power_state != CRITICAL
 
 
 -- =============================================================================
-MODULE CommModule(power_state)
+MODULE CommModule(power_state, power_fault_active)
 
 VAR
   comm_state          : { CONNECTED, DEGRADED, BLACKOUT, AUTOMODE };
@@ -49,7 +49,7 @@ VAR
 
 ASSIGN
   init(comm_state)          := CONNECTED;
-  init(pre_approved_loaded) := FALSE;
+  init(pre_approved_loaded) := TRUE;
   init(blackout_steps)      := 0;
 
   next(comm_state) :=
@@ -67,12 +67,12 @@ ASSIGN
 
   next(pre_approved_loaded) :=
     case
-      comm_state = CONNECTED                               : { TRUE, FALSE };
-      comm_state = DEGRADED & next(comm_state) = BLACKOUT  : TRUE;
-      comm_state = DEGRADED & next(comm_state) != BLACKOUT : { TRUE, FALSE };
-      comm_state = BLACKOUT                                : pre_approved_loaded;
-      comm_state = AUTOMODE & next(comm_state) = DEGRADED  : FALSE;
-      TRUE                                                 : pre_approved_loaded;
+      next(comm_state) = BLACKOUT : TRUE;
+      comm_state = BLACKOUT       : TRUE;
+      comm_state = DEGRADED       : TRUE;
+      comm_state = CONNECTED      : TRUE;
+      comm_state = AUTOMODE       : pre_approved_loaded;
+      TRUE                        : pre_approved_loaded;
     esac;
 
   next(blackout_steps) :=
@@ -227,7 +227,7 @@ MODULE main
 
 VAR
   power : PowerModule;
-  comm  : CommModule(power.power_state);
+  comm  : CommModule(power.power_state, power.power_fault_active);
   nav   : NavModule(power.power_state, comm.comm_state,
                     comm.pre_approved_loaded, power.power_fault_active);
 
@@ -238,9 +238,10 @@ SPEC AG(
 )
 
 -- L1: WILL FAIL — lasso counterexample
--- Once fault is active, rover must not drive until SAFE_MODE is reached
--- Bug: OBSTACLE_DETECTED -> DRIVING with fault active, SAFE_MODE never visited first
+-- Once fault is active, from the NEXT step onward, rover must not drive until SAFE_MODE is reached
+-- X wrapper matches correct model semantics: fault and DRIVING may coincide on fault-entry step
+-- Bug: OBSTACLE_DETECTED -> DRIVING with fault active, SAFE_MODE never visited first on subsequent steps
 LTLSPEC G(
   power.power_fault_active ->
-  (nav.nav_state != DRIVING) U (nav.nav_state = SAFE_MODE)
+  X((nav.nav_state != DRIVING) U (nav.nav_state = SAFE_MODE))
 )
