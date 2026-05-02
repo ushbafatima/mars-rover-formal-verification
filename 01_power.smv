@@ -1,12 +1,8 @@
--- =============================================================================
--- FORMAL METHODS — SE-320  |  BESE-14B  |  Group 01
--- FILE: 01_power.smv
 -- MODULE: PowerModule
 -- Owns: power_state, power_fault_active
 -- Models: Curiosity fault protection engine (1000+ monitors, 39 responses)
 --         Opportunity 22 Wh critical threshold
 --         RTG + lithium-ion gradual degradation (no NOMINAL→CRITICAL jump)
--- =============================================================================
 
 MODULE PowerModule
 

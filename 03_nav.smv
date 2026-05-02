@@ -1,8 +1,4 @@
--- =============================================================================
--- FORMAL METHODS — SE-320  |  BESE-14B  |  Group 01
--- FILE: 03_nav.smv
 -- MODULE: NavModule
--- =============================================================================
 
 MODULE NavModule(power_state, comm_state, pre_approved_loaded, power_fault_active, blackout_steps)
 
@@ -23,22 +19,22 @@ ASSIGN
 
   next(nav_state) :=
     case
-      -- ── PRIORITY 0: LAST BLACKOUT STEP → IDLE [L5 FIX] ──────────────────
+      -- PRIORITY 0: LAST BLACKOUT STEP: IDLE
       -- When blackout_steps = 18, next(comm_state) = DEGRADED (blackout ends).
       -- L5 requires: at that moment, next(nav_state) = IDLE.
       -- This rule fires BEFORE all others to guarantee it unconditionally.
       comm_state = BLACKOUT & blackout_steps >= 18
         : IDLE;
 
-      -- ── PRIORITY 1: AUTOMODE forces SAFE_MODE ────────────────────────────
+      -- PRIORITY 1: AUTOMODE forces SAFE_MODE
       comm_state = AUTOMODE
         : SAFE_MODE;
 
-      -- ── PRIORITY 2: CRITICAL power forces SAFE_MODE ──────────────────────
+      -- PRIORITY 2: CRITICAL power forces SAFE_MODE
       power_state = CRITICAL
         : SAFE_MODE;
 
-      -- ── PRIORITY 3: SAFE_MODE exits ──────────────────────────────────────
+      -- PRIORITY 3: SAFE_MODE exits
       -- During BLACKOUT (non-last step): stay IDLE (will be caught by P0 on last step)
       nav_state = SAFE_MODE & comm_state = BLACKOUT
         : IDLE;
@@ -50,7 +46,7 @@ ASSIGN
       nav_state = SAFE_MODE
         : SAFE_MODE;
 
-      -- ── PRIORITY 4: OBSTACLE_DETECTED ────────────────────────────────────
+      -- PRIORITY 4: OBSTACLE_DETECTED
       nav_state = OBSTACLE_DETECTED & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
       -- During BLACKOUT: go to SAFE_MODE (not IDLE) so C3a is satisfied.
@@ -61,7 +57,7 @@ ASSIGN
       nav_state = OBSTACLE_DETECTED
         : REPLANNING;
 
-      -- ── PRIORITY 5: REPLANNING ───────────────────────────────────────────
+      -- PRIORITY 5: REPLANNING
       nav_state = REPLANNING & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
       -- During BLACKOUT: go to SAFE_MODE so replanning is properly halted.
@@ -75,7 +71,7 @@ ASSIGN
       nav_state = REPLANNING
         : SAFE_MODE;
 
-      -- ── PRIORITY 6: IDLE ─────────────────────────────────────────────────
+      -- PRIORITY 6: IDLE
       -- fault_latch: must visit SAFE_MODE before driving again
       nav_state = IDLE & (fault_latch | power_fault_active | power_state = CRITICAL)
         : SAFE_MODE;
@@ -91,7 +87,7 @@ ASSIGN
       nav_state = IDLE
         : IDLE;
 
-      -- ── PRIORITY 7: DRIVING ──────────────────────────────────────────────
+      -- PRIORITY 7: DRIVING
       nav_state = DRIVING & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
       -- During BLACKOUT: driving stops, go to IDLE
@@ -102,7 +98,7 @@ ASSIGN
       nav_state = DRIVING
         : { DRIVING, IDLE };
 
-      -- ── PRIORITY 8: AUTONAV ──────────────────────────────────────────────
+      -- PRIORITY 8: AUTONAV
       nav_state = AUTONAV & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
       -- During BLACKOUT: autonav stops, go to IDLE

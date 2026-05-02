@@ -1,13 +1,9 @@
--- =============================================================================
--- FORMAL METHODS — SE-320  |  BESE-14B  |  Group 01
--- FILE: 04_main.smv
 -- MODULE: main
 -- Wires PowerModule, CommModule, and NavModule together.
 -- PowerModule feeds power_state and power_fault_active to the others.
 -- CommModule receives power_state and power_fault_active; produces comm_state,
 --   pre_approved_loaded, and blackout_steps for NavModule.
 -- NavModule receives all shared read-only signals; owns navigation FSM.
--- =============================================================================
 
 MODULE main
 

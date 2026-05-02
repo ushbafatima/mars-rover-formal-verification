@@ -1,8 +1,4 @@
--- =============================================================================
--- FORMAL METHODS — SE-320  |  BESE-14B  |  Group 01
--- FILE: 05_properties.smv
 -- All 11 formal properties: C1–C6 (CTL via SPEC) + L1–L5 (LTL via LTLSPEC)
--- =============================================================================
 
 -- C1: Power Gate on Locomotion (Safety)
 SPEC AG(

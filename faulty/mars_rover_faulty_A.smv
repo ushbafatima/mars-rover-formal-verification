@@ -1,16 +1,13 @@
--- =============================================================================
--- FORMAL METHODS — SE-320  |  BESE-14B  |  Group 01
--- FAULTY MODEL A — CTL Counterexample Demonstration
+-- FAULTY MODEL A: CTL Counterexample Demonstration
 -- Demonstrates violation of C1: Power Gate on Locomotion
 --
 -- BUG: Power check completely removed from IDLE departure in NavModule.
 -- Rover can transition IDLE -> DRIVING when power_state = CRITICAL.
 --
 -- Expected output:
---   C1 → false (rover drives on critical power)
---   C2 → true  (pre-approval gate unaffected)
---   C5 → false (cascades from C1)
--- =============================================================================
+--   C1: false (rover drives on critical power)
+--   C2: true  (pre-approval gate unaffected)
+--   C5: false (cascades from C1)
 
 MODULE PowerModule
 
@@ -38,8 +35,6 @@ ASSIGN
 
 FAIRNESS power_state != CRITICAL
 
-
--- =============================================================================
 MODULE CommModule(power_state, power_fault_active)
 
 VAR
@@ -85,12 +80,9 @@ ASSIGN
 FAIRNESS comm_state != BLACKOUT
 FAIRNESS comm_state != AUTOMODE
 
-
--- =============================================================================
 -- FAULTY NavModule
 -- BUG: IDLE -> DRIVING has zero power checks
 -- All other states remain correctly protected
--- =============================================================================
 MODULE NavModule(power_state, comm_state, pre_approved_loaded, power_fault_active)
 
 VAR
@@ -109,11 +101,11 @@ ASSIGN
 
   next(nav_state) :=
     case
-      -- AUTOMODE override — highest priority
+      -- AUTOMODE override: highest priority
       comm_state = AUTOMODE
         : SAFE_MODE;
 
-      -- Power guard on DRIVING and AUTONAV only — IDLE is NOT protected
+      -- Power guard on DRIVING and AUTONAV only: IDLE is NOT protected
       power_state = CRITICAL & (nav_state = DRIVING | nav_state = AUTONAV)
         : SAFE_MODE;
 
@@ -211,8 +203,6 @@ FAIRNESS nav_state != OBSTACLE_DETECTED
 FAIRNESS nav_state != REPLANNING
 FAIRNESS !(power_state = CRITICAL & comm_state = BLACKOUT)
 
-
--- =============================================================================
 MODULE main
 
 VAR
@@ -221,19 +211,19 @@ VAR
   nav   : NavModule(power.power_state, comm.comm_state,
                     comm.pre_approved_loaded, power.power_fault_active);
 
--- C1: WILL FAIL — IDLE has no power guard, rover drives on critical power
+-- C1: WILL FAIL: IDLE has no power guard, rover drives on critical power
 SPEC AG(
   power.power_state = CRITICAL ->
   nav.nav_state != DRIVING & nav.nav_state != AUTONAV
 )
 
--- C2: WILL PASS — blackout pre-approval gate unaffected by bug
+-- C2: WILL PASS: blackout pre-approval gate unaffected by bug
 SPEC AG(
   comm.comm_state = BLACKOUT & nav.nav_state = DRIVING ->
   comm.pre_approved_loaded = TRUE
 )
 
--- C5: WILL FAIL — cascades from C1
+-- C5: WILL FAIL: cascades from C1
 SPEC AG(
   comm.comm_state = BLACKOUT &
   (nav.nav_state = DRIVING | nav.nav_state = AUTONAV) ->

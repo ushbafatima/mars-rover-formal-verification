@@ -1,5 +1,3 @@
--- =============================================================================
--- FORMAL METHODS — SE-320  |  BESE-14B  |  Group 01
 -- FAULTY MODEL B — LTL Counterexample Demonstration
 -- Demonstrates violation of L1: Safe Mode Must Precede Drive Resumption
 --
@@ -8,9 +6,8 @@
 -- violating L1's Until obligation: fault_active -> X(!DRIVING U SAFE_MODE)
 --
 -- Expected output:
---   C1 → true  (power guard covers all states)
---   L1 → false (lasso counterexample, look for "-- Loop starts here --")
--- =============================================================================
+--   C1: true  (power guard covers all states)
+--   L1: false (lasso counterexample)
 
 MODULE PowerModule
 
@@ -38,8 +35,6 @@ ASSIGN
 
 FAIRNESS power_state != CRITICAL
 
-
--- =============================================================================
 MODULE CommModule(power_state, power_fault_active)
 
 VAR
@@ -86,11 +81,10 @@ FAIRNESS comm_state != BLACKOUT
 FAIRNESS comm_state != AUTOMODE
 
 
--- =============================================================================
 -- FAULTY NavModule
 -- BUG: OBSTACLE_DETECTED -> DRIVING directly when power_fault_active
 -- Extra guard added: next(power_state) != CRITICAL ensures C1 still passes
--- =============================================================================
+
 MODULE NavModule(power_state, comm_state, pre_approved_loaded, power_fault_active)
 
 VAR
@@ -157,7 +151,7 @@ ASSIGN
       nav_state = REPLANNING
         : SAFE_MODE;
 
-      -- IDLE (correct — full power guard in place)
+      -- IDLE (correct: full power guard in place)
       nav_state = IDLE & (fault_latch | power_fault_active | power_state = CRITICAL)
         : SAFE_MODE;
       nav_state = IDLE & comm_state = BLACKOUT
@@ -221,8 +215,6 @@ FAIRNESS nav_state != OBSTACLE_DETECTED
 FAIRNESS nav_state != REPLANNING
 FAIRNESS !(power_state = CRITICAL & comm_state = BLACKOUT)
 
-
--- =============================================================================
 MODULE main
 
 VAR
@@ -231,7 +223,7 @@ VAR
   nav   : NavModule(power.power_state, comm.comm_state,
                     comm.pre_approved_loaded, power.power_fault_active);
 
--- C1: MUST PASS — power guard covers all states
+-- C1: MUST PASS: power guard covers all states
 SPEC AG(
   power.power_state = CRITICAL ->
   nav.nav_state != DRIVING & nav.nav_state != AUTONAV

@@ -1,9 +1,5 @@
--- =============================================================================
--- FORMAL METHODS — SE-320  |  BESE-14B  |  Group 01
--- FILE: 02_comm.smv
 -- MODULE: CommModule
 -- Parameters: power_state, power_fault_active
--- =============================================================================
 
 MODULE CommModule(power_state, power_fault_active)
 
