@@ -4,8 +4,8 @@
 -- MODULE: main
 -- Wires PowerModule, CommModule, and NavModule together.
 -- PowerModule feeds power_state and power_fault_active to the others.
--- CommModule receives power_state; produces comm_state, pre_approved_loaded,
---   post_blackout_hold for NavModule.
+-- CommModule receives power_state and power_fault_active; produces comm_state,
+--   pre_approved_loaded, post_blackout_hold, blackout_exit_pending for NavModule.
 -- NavModule receives all shared read-only signals; owns navigation FSM.
 -- =============================================================================
 
@@ -13,6 +13,7 @@ MODULE main
 
 VAR
   power : PowerModule;
-  comm  : CommModule(power.power_state);
+  comm  : CommModule(power.power_state, power.power_fault_active);
   nav   : NavModule(power.power_state, comm.comm_state, comm.pre_approved_loaded,
-                    power.power_fault_active, comm.post_blackout_hold);
+                    power.power_fault_active, comm.post_blackout_hold,
+                    comm.blackout_exit_pending);

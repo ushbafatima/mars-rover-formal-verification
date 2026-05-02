@@ -4,7 +4,7 @@
 -- MODULE: NavModule
 -- =============================================================================
 
-MODULE NavModule(power_state, comm_state, pre_approved_loaded, power_fault_active, post_blackout_hold)
+MODULE NavModule(power_state, comm_state, pre_approved_loaded, power_fault_active, post_blackout_hold, blackout_exit_pending)
 
 VAR
   nav_state         : { IDLE, DRIVING, AUTONAV, OBSTACLE_DETECTED, REPLANNING, SAFE_MODE };
@@ -21,7 +21,7 @@ ASSIGN
 
   next(nav_state) :=
     case
-      -- ── PRIORITY 1: AUTOMODE forces SAFE_MODE ────────────────────────────
+      -- ── PRIORITY 1: AUTOMODE forces SAFE_MODE ─────────────────────────────
       comm_state = AUTOMODE
         : SAFE_MODE;
 
@@ -32,9 +32,7 @@ ASSIGN
       nav_state = SAFE_MODE
         : SAFE_MODE;
 
-      -- ── PRIORITY 3: OBSTACLE_DETECTED (must resolve before any override) ──
-      -- [C3a] OBSTACLE_DETECTED must always go to REPLANNING or SAFE_MODE.
-      -- post_blackout_hold must NOT override this — C3a takes priority.
+      -- ── PRIORITY 3: OBSTACLE_DETECTED ─────────────────────────────────────
       nav_state = OBSTACLE_DETECTED & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
       nav_state = OBSTACLE_DETECTED & comm_state = BLACKOUT & power_state = LOW
@@ -44,9 +42,7 @@ ASSIGN
       nav_state = OBSTACLE_DETECTED
         : REPLANNING;
 
-      -- ── PRIORITY 4: REPLANNING (must resolve before any override) ─────────
-      -- [C3b] REPLANNING must always go to DRIVING, AUTONAV, or SAFE_MODE.
-      -- post_blackout_hold must NOT override this — C3b takes priority.
+      -- ── PRIORITY 4: REPLANNING ─────────────────────────────────────────────
       nav_state = REPLANNING & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
       nav_state = REPLANNING & comm_state = AUTOMODE
@@ -64,78 +60,64 @@ ASSIGN
         & (!pre_approved_loaded | power_state = LOW | power_fault_active)
         : SAFE_MODE;
 
-      -- ── PRIORITY 5: POST-BLACKOUT HOLD [B5, F-L5] ─────────────────────────
-      -- Only applies to IDLE, DRIVING, AUTONAV — never overrides OBSTACLE/REPLANNING.
-      -- Forces IDLE at the first step after blackout ends.
-      post_blackout_hold
+      -- ── PRIORITY 5: POST-BLACKOUT HOLD [L5] ───────────────────────────────
+      -- Uses blackout_exit_pending (fires on the SAME step blackout exits) so
+      -- nav is forced to IDLE immediately when blackout ends, not one step later.
+      -- Only applies to DRIVING, AUTONAV, IDLE — never OBSTACLE/REPLANNING/SAFE_MODE.
+      -- Fault/critical exempt so L1 is not broken.
+      blackout_exit_pending
+        & !power_fault_active & power_state != CRITICAL
+        & comm_state != AUTOMODE
+        & nav_state != SAFE_MODE
+        & nav_state != OBSTACLE_DETECTED
+        & nav_state != REPLANNING
         : IDLE;
 
-      -- ── IDLE ──────────────────────────────────────────────────────────────
-
-      -- [F-L1] Power fault in IDLE → SAFE_MODE (not just stay IDLE).
-      -- Until requires SAFE_MODE to be reached, not just avoided-DRIVING.
+      -- ── PRIORITY 6: IDLE ───────────────────────────────────────────────────
       nav_state = IDLE & power_fault_active
         : SAFE_MODE;
-
-      -- [C1] Critical power → SAFE_MODE
       nav_state = IDLE & power_state = CRITICAL
         : SAFE_MODE;
-
-      -- Cannot drive in BLACKOUT without pre-approval or terrain [B1, B2]
       nav_state = IDLE & comm_state = BLACKOUT
         & (!pre_approved_loaded | !terrain_mapped)
         : IDLE;
-
-      -- BLACKOUT + all conditions met → limited drive
       nav_state = IDLE & comm_state = BLACKOUT
         & pre_approved_loaded & terrain_mapped
         & power_state != CRITICAL & !power_fault_active
         : { IDLE, DRIVING };
-
-      -- Normal healthy idle → drive or autonav
       nav_state = IDLE & power_state != CRITICAL & !power_fault_active
         & comm_state != BLACKOUT & comm_state != AUTOMODE
         & terrain_mapped
         : { DRIVING, AUTONAV };
-
-      -- Terrain not yet mapped
       nav_state = IDLE & power_state != CRITICAL & !power_fault_active
         & comm_state != BLACKOUT & comm_state != AUTOMODE
         & !terrain_mapped
         : IDLE;
 
-      -- ── DRIVING ───────────────────────────────────────────────────────────
-
-      nav_state = DRIVING & obstacle_detected
-        : OBSTACLE_DETECTED;
-
-      -- [F-C1, F-L1] Any power fault while driving → SAFE_MODE
+      -- ── PRIORITY 7: DRIVING ───────────────────────────────────────────────
+      -- [F-L1] Fault check BEFORE obstacle so fault always reaches SAFE_MODE.
       nav_state = DRIVING & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
-
+      nav_state = DRIVING & obstacle_detected
+        : OBSTACLE_DETECTED;
       nav_state = DRIVING & comm_state = BLACKOUT & pre_approved_loaded & terrain_mapped
         & power_state != CRITICAL & !power_fault_active & !obstacle_detected
         : { DRIVING, IDLE };
-
       nav_state = DRIVING & comm_state = BLACKOUT
         & (!pre_approved_loaded | !terrain_mapped)
         : SAFE_MODE;
-
       nav_state = DRIVING & comm_state != BLACKOUT & comm_state != AUTOMODE
         & power_state != CRITICAL & !power_fault_active & !obstacle_detected
         : { DRIVING, IDLE };
 
-      -- ── AUTONAV ───────────────────────────────────────────────────────────
-
-      nav_state = AUTONAV & obstacle_detected
-        : OBSTACLE_DETECTED;
-
+      -- ── PRIORITY 8: AUTONAV ───────────────────────────────────────────────
+      -- [F-L1] Fault check BEFORE obstacle so fault always reaches SAFE_MODE.
       nav_state = AUTONAV & (power_state = CRITICAL | power_fault_active)
         : SAFE_MODE;
-
+      nav_state = AUTONAV & obstacle_detected
+        : OBSTACLE_DETECTED;
       nav_state = AUTONAV & comm_state = BLACKOUT
         : SAFE_MODE;
-
       nav_state = AUTONAV & comm_state != BLACKOUT & comm_state != AUTOMODE
         & power_state != CRITICAL & !power_fault_active & !obstacle_detected
         : { AUTONAV, IDLE };
